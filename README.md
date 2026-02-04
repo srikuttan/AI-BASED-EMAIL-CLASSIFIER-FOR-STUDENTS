@@ -18,7 +18,7 @@ This project is configured for **Visual Studio Code**.
 2.  Click the **Run and Debug** icon on the left sidebar (Play/Bug icon).
 3.  Select **"Run Email Classifier"** from the top dropdown.
 4.  Click the **Green Play Button** (▷).
-5.  Open **http://localhost:8000** in your browser.
+5.  Open **http://127.0.0.1:8000** in your browser.
 
 ## Manual Run
 If you prefer the terminal:
