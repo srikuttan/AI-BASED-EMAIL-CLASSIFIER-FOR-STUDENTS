@@ -1,0 +1,14 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Email Classifier",
+            "type": "python",
+            "request": "launch",
+            "module": "backend.main",
+            "cwd": "${workspaceFolder}",
+            "args": [],
+            "justMyCode": true
+        }
+    ]
+}

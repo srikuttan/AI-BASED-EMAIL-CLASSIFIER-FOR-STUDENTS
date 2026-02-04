@@ -1,0 +1,6 @@
+{
+    "python.defaultInterpreterPath": "C:\\Users\\Srivishnu K R\\AppData\\Local\\Programs\\Python\\Python39\\python.exe",
+    "python.analysis.extraPaths": [
+        "./backend"
+    ]
+}
