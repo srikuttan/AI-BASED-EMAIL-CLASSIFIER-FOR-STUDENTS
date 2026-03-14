@@ -1,11 +1,21 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+import os
+import logging
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from . import models, database, auth, classifier
 from .database import engine, get_db
 from pydantic import BaseModel, ConfigDict
-from typing import List, Optional
-from datetime import timedelta
+from pathlib import Path
+
+# Feature flag: initial value from env; can be changed at runtime via API
+_initial_classification = os.getenv("ENABLE_EMAIL_CLASSIFICATION", "true").lower() in ("true", "1", "yes")
+runtime_config = {"enable_email_classification": _initial_classification}
+DEFAULT_CATEGORY_WHEN_DISABLED = "Personal"
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+logger.info("ENABLE_EMAIL_CLASSIFICATION = %s", runtime_config["enable_email_classification"])
 
 # Create database tables
 models.Base.metadata.create_all(bind=engine)
@@ -57,6 +67,12 @@ class EmailResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+class EmailUpdateCategory(BaseModel):
+    category: str
+
+class ClassificationConfigUpdate(BaseModel):
+    enabled: bool
+
 # Routes
 
 @app.post("/auth/register", response_model=Token)
@@ -83,15 +99,31 @@ def login(user: UserLogin, db: Session = Depends(get_db)):
     access_token = auth.create_access_token(data={"sub": db_user.email})
     return {"access_token": access_token, "token_type": "bearer"}
 
+@app.get("/config/classification")
+def get_classification_config(current_user: models.User = Depends(auth.get_current_user)):
+    return {"enabled": runtime_config["enable_email_classification"]}
+
+@app.patch("/config/classification")
+def update_classification_config(
+    payload: ClassificationConfigUpdate,
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    runtime_config["enable_email_classification"] = payload.enabled
+    logger.info("ENABLE_EMAIL_CLASSIFICATION set to %s via API", payload.enabled)
+    return {"enabled": runtime_config["enable_email_classification"]}
+
 @app.post("/emails/send")
 def send_email(email: EmailCreate, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     recipient = auth.get_user(db, email=email.recipient_email)
     if not recipient:
         raise HTTPException(status_code=404, detail="Recipient not found")
     
-    # Predict category
-    category = classifier.classifier.predict(email.subject, email.body)
-    
+    # Predict category (or use default when classification is disabled)
+    if runtime_config["enable_email_classification"]:
+        category = classifier.classifier.predict(email.subject, email.body)
+    else:
+        category = DEFAULT_CATEGORY_WHEN_DISABLED
+
     new_email = models.Email(
         sender_id=current_user.id,
         recipient_id=recipient.id,
@@ -120,20 +152,55 @@ def get_inbox(db: Session = Depends(get_db), current_user: models.User = Depends
         for e in emails
     ]
 
-# Serve Static Files
+@app.patch("/emails/{email_id}/category")
+def update_email_category(
+    email_id: int,
+    payload: EmailUpdateCategory,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    email = db.query(models.Email).filter(models.Email.id == email_id).first()
+    if not email:
+        raise HTTPException(status_code=404, detail="Email not found")
+
+    # Only allow the recipient to change the classification
+    if email.recipient_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not allowed to change this email")
+
+    allowed_categories = ["Assignments", "Notices", "Personal", "Spam"]
+    if payload.category not in allowed_categories:
+        raise HTTPException(status_code=400, detail="Invalid category")
+
+    email.category = payload.category
+    db.commit()
+    db.refresh(email)
+
+    return {
+        "id": email.id,
+        "subject": email.subject,
+        "body": email.body,
+        "category": email.category,
+        "sender_email": email.sender.email,
+        "timestamp": email.timestamp.isoformat(),
+    }
+
+# Serve Static Files (paths relative to project root for any CWD)
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-import os
 
-# Create static directory if it doesn't exist
-if not os.path.exists("static"):
-    os.makedirs("static")
+_BASE_DIR = Path(__file__).resolve().parent.parent
+_STATIC_DIR = _BASE_DIR / "static"
+if not _STATIC_DIR.exists():
+    _STATIC_DIR.mkdir(parents=True)
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 @app.get("/")
 def read_root():
-    return FileResponse('static/index.html')
+    index_path = _STATIC_DIR / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="Static files not found")
+    return FileResponse(str(index_path))
 
 if __name__ == "__main__":
     import uvicorn

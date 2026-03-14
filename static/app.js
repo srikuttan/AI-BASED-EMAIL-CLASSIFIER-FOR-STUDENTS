@@ -3,6 +3,7 @@ const API_URL = ""; // Relative path since served from same origin
 // State
 let token = localStorage.getItem('token');
 let userEmail = localStorage.getItem('userEmail');
+let currentCategory = 'all';
 
 // UI Elements
 const screenAuth = document.getElementById('auth-screen');
@@ -13,7 +14,7 @@ const emailList = document.getElementById('email-list');
 const composeModal = document.getElementById('compose-modal');
 
 // Init
-if(token) {
+if (token) {
     showDashboard();
 }
 
@@ -33,7 +34,7 @@ loginForm.addEventListener('submit', async (e) => {
     try {
         const res = await axios.post('/auth/login', { email, password });
         handleLoginSuccess(res.data.access_token, email);
-    } catch(err) {
+    } catch (err) {
         showToast('Login failed: ' + (err.response?.data?.detail || 'Unknown error'), true);
     }
 });
@@ -45,7 +46,7 @@ registerForm.addEventListener('submit', async (e) => {
     try {
         const res = await axios.post('/auth/register', { email, password });
         handleLoginSuccess(res.data.access_token, email);
-    } catch(err) {
+    } catch (err) {
         showToast('Registration failed: ' + (err.response?.data?.detail || 'Unknown error'), true);
     }
 });
@@ -66,40 +67,111 @@ function logout() {
     screenDashboard.classList.remove('active');
 }
 
+let classificationEnabled = true;
+
 function showDashboard() {
     screenAuth.classList.remove('active');
     screenDashboard.classList.add('active');
-    document.getElementById('user-email-display').textContent = userEmail;
+    const emailDisplay = document.getElementById('user-email-display');
+    if (emailDisplay) emailDisplay.textContent = userEmail;
+
+    // Also update modal email
+    const modalEmail = document.getElementById('modal-user-email');
+    if (modalEmail) modalEmail.textContent = userEmail;
+
+    loadClassificationState();
     loadInbox();
+}
+
+async function loadClassificationState() {
+    try {
+        const res = await axios.get('/config/classification', {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        classificationEnabled = res.data.enabled;
+        updateClassificationToggle();
+    } catch (err) {
+        if (err.response?.status === 401) logout();
+        else classificationEnabled = true;
+        updateClassificationToggle();
+    }
+}
+
+function updateClassificationToggle() {
+    const btn = document.getElementById('classification-toggle');
+    const wrap = document.querySelector('.classification-toggle-wrap');
+    if (!btn || !wrap) return;
+    btn.setAttribute('aria-pressed', classificationEnabled ? 'true' : 'false');
+    wrap.setAttribute('aria-checked', classificationEnabled ? 'true' : 'false');
+}
+
+async function toggleClassification() {
+    classificationEnabled = !classificationEnabled;
+    try {
+        await axios.patch('/config/classification', { enabled: classificationEnabled }, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        updateClassificationToggle();
+        showToast(classificationEnabled ? 'AI classification turned on' : 'AI classification turned off');
+    } catch (err) {
+        classificationEnabled = !classificationEnabled; // revert
+        updateClassificationToggle();
+        showToast('Failed to update setting', true);
+    }
+}
+
+function getCurrentCategory() {
+    return currentCategory;
+}
+
+function escapeHtml(text) {
+    if (text == null) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 // Emails
 async function loadInbox(category = 'all') {
-    // Update active menu
-    document.querySelectorAll('.menu li').forEach(li => li.classList.remove('active'));
-    event?.target.classList.add('active'); // Assumption: triggered by click
+    currentCategory = category;
+
+    // Update active menu by data-category
+    document.querySelectorAll('.menu li').forEach(li => {
+        li.classList.toggle('active', (li.getAttribute('data-category') || 'all') === category);
+    });
+
+    // Update page title
+    const titles = {
+        all: 'Inbox',
+        Assignments: 'Assignments',
+        Notices: 'Notices',
+        Personal: 'Personal',
+        Spam: 'Spam'
+    };
+    const titleEl = document.getElementById('page-title');
+    if (titleEl) titleEl.textContent = titles[category] || 'Inbox';
 
     try {
         const res = await axios.get('/emails/inbox', {
             headers: { Authorization: `Bearer ${token}` }
         });
-        
+
         let emails = res.data;
-        if(category !== 'all') {
+        if (category !== 'all') {
             emails = emails.filter(e => e.category === category);
         }
 
         renderEmails(emails);
-    } catch(err) {
-        if(err.response?.status === 401) logout();
-        else showToast('Failed to load inbox');
+    } catch (err) {
+        if (err.response?.status === 401) logout();
+        else showToast('Failed to load inbox', true);
     }
 }
 
 function renderEmails(emails) {
     emailList.innerHTML = '';
-    if(emails.length === 0) {
-        emailList.innerHTML = '<div style="text-align:center;color:var(--text-secondary);padding:2rem;">No emails found</div>';
+    if (emails.length === 0) {
+        emailList.innerHTML = '<div class="email-list-empty"><span class="email-list-empty-icon">📭</span>No emails in this folder</div>';
         return;
     }
 
@@ -108,20 +180,57 @@ function renderEmails(emails) {
         div.className = 'email-item';
         div.innerHTML = `
             <div class="email-header">
-                <span class="sender">${email.sender_email}</span>
-                <span class="time">${new Date(email.timestamp).toLocaleDateString()}</span>
+                <span class="sender">${escapeHtml(email.sender_email)}</span>
+                <span class="time">${escapeHtml(new Date(email.timestamp).toLocaleDateString())}</span>
             </div>
-            <div class="subject">${email.subject}</div>
-            <div class="preview">${email.body}</div>
-            <span class="tag ${email.category}">${email.category}</span>
+            <div class="subject">${escapeHtml(email.subject)}</div>
+            <div class="preview">${escapeHtml(email.body)}</div>
+            <div class="email-footer">
+                <span class="tag ${escapeHtml(email.category)}">${escapeHtml(email.category)}</span>
+                <div class="category-select-wrap">
+                    <label for="cat-${email.id}">Change:</label>
+                    <select id="cat-${email.id}" class="category-select" data-email-id="${email.id}" title="Change category">
+                        <option value="Assignments"${email.category === 'Assignments' ? ' selected' : ''}>Assignments</option>
+                        <option value="Notices"${email.category === 'Notices' ? ' selected' : ''}>Notices</option>
+                        <option value="Personal"${email.category === 'Personal' ? ' selected' : ''}>Personal</option>
+                        <option value="Spam"${email.category === 'Spam' ? ' selected' : ''}>Spam</option>
+                    </select>
+                </div>
+            </div>
         `;
+
+        const select = div.querySelector('.category-select');
+        select.addEventListener('change', (e) => {
+            const newCategory = e.target.value;
+            updateEmailCategory(email.id, newCategory);
+        });
+
         emailList.appendChild(div);
     });
 }
 
+async function updateEmailCategory(emailId, category) {
+    try {
+        await axios.patch(`/emails/${emailId}/category`,
+            { category },
+            { headers: { Authorization: `Bearer ${token}` } }
+        );
+        showToast('Category updated');
+        loadInbox(getCurrentCategory());
+    } catch (err) {
+        showToast('Failed to update: ' + (err.response?.data?.detail || 'Error'), true);
+    }
+}
+
 // Compose
-function openCompose() { composeModal.classList.add('active'); }
-function closeCompose() { composeModal.classList.remove('active'); }
+function openCompose() {
+    composeModal.classList.add('active');
+    composeModal.setAttribute('aria-hidden', 'false');
+}
+function closeCompose() {
+    composeModal.classList.remove('active');
+    composeModal.setAttribute('aria-hidden', 'true');
+}
 
 document.getElementById('compose-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -130,7 +239,7 @@ document.getElementById('compose-form').addEventListener('submit', async (e) => 
     const body = document.getElementById('compose-body').value;
 
     try {
-        await axios.post('/emails/send', 
+        await axios.post('/emails/send',
             { recipient_email, subject, body },
             { headers: { Authorization: `Bearer ${token}` } }
         );
@@ -138,7 +247,7 @@ document.getElementById('compose-form').addEventListener('submit', async (e) => 
         closeCompose();
         document.getElementById('compose-form').reset();
         loadInbox('all'); // Refresh
-    } catch(err) {
+    } catch (err) {
         showToast('Failed to send: ' + (err.response?.data?.detail || 'Error'), true);
     }
 });
@@ -147,7 +256,7 @@ document.getElementById('compose-form').addEventListener('submit', async (e) => 
 function showToast(msg, isError = false) {
     const toast = document.getElementById('toast');
     toast.textContent = msg;
-    toast.style.background = isError ? '#ef4444' : '#10b981';
-    toast.classList.add('show');
+    toast.classList.remove('toast-success', 'toast-error');
+    toast.classList.add('show', isError ? 'toast-error' : 'toast-success');
     setTimeout(() => toast.classList.remove('show'), 3000);
 }

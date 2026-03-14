@@ -3,7 +3,7 @@
     "configurations": [
         {
             "name": "Run Email Classifier",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "module": "backend.main",
             "cwd": "${workspaceFolder}",
